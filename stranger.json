@@ -1,0 +1,108 @@
+{
+  "expectedTarballFiles": [
+    "package/LICENSE",
+    "package/README.md",
+    "package/dist/d1.d.ts",
+    "package/dist/d1.js",
+    "package/dist/effect.d.ts",
+    "package/dist/effect.js",
+    "package/dist/index.d.ts",
+    "package/dist/index.js",
+    "package/dist/internal/async-runtime.d.ts",
+    "package/dist/internal/async-runtime.js",
+    "package/dist/internal/async-sql.d.ts",
+    "package/dist/internal/async-sql.js",
+    "package/dist/internal/async-store.d.ts",
+    "package/dist/internal/async-store.js",
+    "package/dist/internal/identities.d.ts",
+    "package/dist/internal/identities.js",
+    "package/dist/internal/lane.d.ts",
+    "package/dist/internal/lane.js",
+    "package/dist/internal/promise-watchdog-host.d.ts",
+    "package/dist/internal/promise-watchdog-host.js",
+    "package/dist/internal/runtime.d.ts",
+    "package/dist/internal/runtime.js",
+    "package/dist/internal/sqlite-store.d.ts",
+    "package/dist/internal/sqlite-store.js",
+    "package/dist/internal/watchdog-error.d.ts",
+    "package/dist/internal/watchdog-error.js",
+    "package/dist/node-sqlite.d.ts",
+    "package/dist/node-sqlite.js",
+    "package/dist/postgres.d.ts",
+    "package/dist/postgres.js",
+    "package/docs/api/README.md",
+    "package/docs/api/d1.md",
+    "package/docs/api/effect.md",
+    "package/docs/api/index.md",
+    "package/docs/api/node-sqlite.md",
+    "package/docs/api/postgres.md",
+    "package/package.json"
+  ],
+  "localDependencies": ["../cairn"],
+  "runtimeFixture": "test/stranger/runtime.mjs",
+  "typecheckFixture": "test/stranger/consumer.mts",
+  "docs": {
+    "sigil": "restricted",
+    "home": {
+      "lead": "A small durable job queue for TypeScript on SQLite, D1 or PostgreSQL: jobs survive a crash, run once per claim and report an honest outcome.",
+      "example": {
+        "file": "home.ts",
+        "title": "Run your first job",
+        "caption": "Runs one job through an in-memory node:sqlite database and prints its settled status. Needs Node.js 24 for node:sqlite."
+      },
+      "ladder": {
+        "start": [
+          {
+            "title": "Quickstart",
+            "href": "/quickstart/",
+            "description": "Ingest one job and tick it to a settled outcome."
+          },
+          {
+            "title": "Core concepts",
+            "href": "/concepts/#core-concepts",
+            "description": "Jobs, states, ingest, tick, disappearance recovery and host ports."
+          }
+        ],
+        "tasks": [
+          {
+            "title": "Enqueue a job inside your own transaction",
+            "href": "/api/entry/",
+            "description": "transactional.enqueueAcceptedJob commits your write and the job together."
+          },
+          {
+            "title": "Run jobs on D1 or PostgreSQL",
+            "href": "/api/d1/",
+            "description": "createD1Watchdog and createPostgresWatchdog run the same engine over a shared database."
+          },
+          {
+            "title": "Run two lanes at once",
+            "href": "/concepts/#concurrent-owner-local-delivery",
+            "description": "Opt one concurrentLane into tickConcurrent() without changing stored schema."
+          },
+          {
+            "title": "Run the engine with Effect",
+            "href": "/api/effect/",
+            "description": "makeRuntime runs the same lifecycle as Effect values, with readSettled for paging."
+          }
+        ],
+        "reference": [
+          {
+            "title": "API reference",
+            "href": "/api/",
+            "description": "Watchdog, /effect, /node-sqlite, /d1 and /postgres entrypoints."
+          },
+          {
+            "title": "Install",
+            "href": "/install/",
+            "description": "Entrypoints, runtime dependencies and the Node.js version."
+          },
+          {
+            "title": "Status and limits",
+            "href": "/status/",
+            "description": "Error codes, at-least-once delivery and ID limits."
+          }
+        ]
+      }
+    }
+  }
+}

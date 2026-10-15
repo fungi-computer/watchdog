@@ -1,0 +1,25 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "extends": "../../tooling/docs/typedoc.base.json",
+  "name": "@fungi.computer/watchdog",
+  "entryPoints": [
+    "src/index.ts",
+    "src/effect.ts",
+    "src/d1.ts",
+    "src/postgres.ts",
+    "src/node-sqlite.ts"
+  ],
+  "tsconfig": "tsconfig.json",
+  "out": "docs/api",
+  "requiredToBeDocumented": [
+    "Enum",
+    "EnumMember",
+    "Variable",
+    "Function",
+    "Class",
+    "Interface",
+    "Method",
+    "Accessor",
+    "TypeAlias"
+  ]
+}
