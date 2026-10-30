@@ -23,8 +23,8 @@ npm install @fungi.computer/watchdog
 
 Watchdog is ESM-only. The SQLite entrypoint runs anywhere you have a synchronous
 SQLite handle, such as Cloudflare Durable Object storage or `node:sqlite` in
-Node 24. It depends on `effect`, `pg` and `@cloudflare/workers-types`, which npm
-installs for you.
+Node 24. Its runtime dependencies include Cairn, `effect`, `pg`, `@types/pg` and
+`@cloudflare/workers-types`, which npm installs for you.
 
 Entrypoints:
 
