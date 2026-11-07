@@ -53,6 +53,7 @@ export function createD1Watchdog(
       .bind(...statement.values);
   const runtime = createAsyncRuntime(
     {
+      dialect: "sqlite",
       clock: options.now === undefined ? "unixepoch('subsec')*1000" : undefined,
       query: async (statement) =>
         (await prepare(statement).all<SqlRow>()).results,

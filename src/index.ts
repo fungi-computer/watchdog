@@ -9,6 +9,7 @@ import { WatchdogError } from "./internal/watchdog-error.js";
 
 export { WatchdogError } from "./internal/watchdog-error.js";
 export {
+  WatchdogCompletingJobSchema,
   WatchdogCancellationIntentSchema,
   WatchdogCancellationResultSchema,
   WatchdogExecutionDecisionSchema,
@@ -23,6 +24,7 @@ export {
 export type {
   EffectWatchdogOptions,
   EffectWatchdogExecutor,
+  WatchdogCompletingJob,
   WatchdogCancellationDecision,
   WatchdogCancellationIntent,
   WatchdogCancellationResult,
@@ -47,12 +49,16 @@ export type {
   WatchdogStoredJob,
   WatchdogTickResult,
   WatchdogTransactionalProjection,
+  WatchdogWakeState,
+  WatchdogRetryPolicy,
+  WatchdogAttempt,
 } from "./effect.js";
 
 /** Promise host executor for one generic running job. */
 export type WatchdogExecutor = (
   job: core.WatchdogRunningJob,
   signal: AbortSignal,
+  attempt: core.WatchdogAttempt | undefined,
 ) => Promise<core.WatchdogExecutionDecision>;
 
 /** Options for constructing the Promise facade. */
@@ -65,6 +71,10 @@ export type WatchdogOptions = Readonly<{
   isAlive: (job: core.WatchdogRunningJob) => Promise<boolean>;
   /** Executes one generic claimed job. */
   execute: WatchdogExecutor;
+  /** Resolve the code-owned delivery policy before reserving a receiver attempt. */
+  retryPolicy?: (
+    job: core.WatchdogRunningJob,
+  ) => Promise<core.WatchdogRetryPolicy | undefined>;
   /** Recomputes the owner wake after durable state changes. */
   wake: Readonly<{
     /** Arms the next wake from current owner state. */
@@ -76,8 +86,8 @@ export type WatchdogOptions = Readonly<{
 
 /** Promise facade over the canonical Effect runtime. */
 export type WatchdogRuntime = Readonly<{
-  /** Whether any queued or running job still needs owner reconciliation. */
-  hasPendingWork: () => Promise<boolean>;
+  /** Read readiness and the next deadline from the same durable work rows. */
+  wakeState: (now: number) => Promise<core.WatchdogWakeState>;
   /** Persists one queued job. */
   ingest: (job: core.WatchdogQueuedJob) => Promise<core.WatchdogIngestResult>;
   /** Reads one durable job. */
@@ -152,7 +162,7 @@ function make(
 
 function promiseRuntime(runtime: core.WatchdogRuntimeEffect): WatchdogRuntime {
   return Object.freeze({
-    hasPendingWork: () => runPromise(runtime.hasPendingWork),
+    wakeState: (now) => runPromise(runtime.wakeState(now)),
     ingest: (job) => runPromise(runtime.ingest(job)),
     read: (jobId) => runPromise(runtime.read(jobId)),
     readQueueHead: (queue) => runPromise(runtime.readQueueHead(queue)),

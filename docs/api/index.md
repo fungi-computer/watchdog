@@ -28,10 +28,10 @@ new WatchdogError(failureKind, cause?): WatchdogError;
 
 ###### Parameters
 
-| Parameter     | Type                                                                                                                                                                          | Description                                                                                                                                |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `failureKind` | \| `"store_unavailable"` \| `"store_invalid"` \| `"claim_unavailable"` \| `"execution_failed"` \| `"settlement_rejected"` \| `"wake_unavailable"` \| `"liveness_unavailable"` | -                                                                                                                                          |
-| `cause?`      | `unknown`                                                                                                                                                                     | The original thrown value, kept for server-side diagnosis only. `cause` is already the closed category above, so this is a separate field. |
+| Parameter     | Type                                                                                                                                                                                              | Description                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `failureKind` | \| `"store_unavailable"` \| `"store_invalid"` \| `"claim_unavailable"` \| `"drain_failed"` \| `"execution_failed"` \| `"settlement_rejected"` \| `"wake_unavailable"` \| `"liveness_unavailable"` | -                                                                                                                                          |
+| `cause?`      | `unknown`                                                                                                                                                                                         | The original thrown value, kept for server-side diagnosis only. `cause` is already the closed category above, so this is a separate field. |
 
 ###### Returns
 
@@ -58,6 +58,7 @@ readonly cause:
   | "store_unavailable"
   | "store_invalid"
   | "claim_unavailable"
+  | "drain_failed"
   | "execution_failed"
   | "settlement_rejected"
   | "wake_unavailable"
@@ -81,17 +82,22 @@ readonly optional underlying?: unknown;
 ### WatchdogExecutor
 
 ```ts
-type WatchdogExecutor = (job, signal) => Promise<WatchdogExecutionDecision>;
+type WatchdogExecutor = (
+  job,
+  signal,
+  attempt,
+) => Promise<WatchdogExecutionDecision>;
 ```
 
 Promise host executor for one generic running job.
 
 #### Parameters
 
-| Parameter | Type                                                 |
-| --------- | ---------------------------------------------------- |
-| `job`     | [`WatchdogRunningJob`](effect.md#watchdogrunningjob) |
-| `signal`  | `AbortSignal`                                        |
+| Parameter | Type                                                          |
+| --------- | ------------------------------------------------------------- |
+| `job`     | [`WatchdogRunningJob`](effect.md#watchdogrunningjob)          |
+| `signal`  | `AbortSignal`                                                 |
+| `attempt` | [`WatchdogAttempt`](effect.md#watchdogattempt) \| `undefined` |
 
 #### Returns
 
@@ -107,6 +113,7 @@ type WatchdogOptions = Readonly<{
   owner: WatchdogSqliteOwner;
   isAlive: (job) => Promise<boolean>;
   execute: WatchdogExecutor;
+  retryPolicy?: (job) => Promise<WatchdogRetryPolicy | undefined>;
   wake: Readonly<{
     recompute: () => Promise<void>;
   }>;
@@ -122,7 +129,7 @@ Options for constructing the Promise facade.
 
 ```ts
 type WatchdogRuntime = Readonly<{
-  hasPendingWork: () => Promise<boolean>;
+  wakeState: (now) => Promise<WatchdogWakeState>;
   ingest: (job) => Promise<WatchdogIngestResult>;
   read: (jobId) => Promise<WatchdogReadResult>;
   readQueueHead: (queue) => Promise<WatchdogQueueHead>;
@@ -159,7 +166,7 @@ type WatchdogApi = Readonly<{
     (options): Promise<ConcurrentWatchdogRuntime>;
     (options): Promise<
       Readonly<{
-        hasPendingWork: () => Promise<boolean>;
+        wakeState: (now) => Promise<WatchdogWakeState>;
         ingest: (job) => Promise<WatchdogIngestResult>;
         read: (jobId) => Promise<WatchdogReadResult>;
         readQueueHead: (queue) => Promise<WatchdogQueueHead>;
@@ -187,6 +194,12 @@ const Watchdog: WatchdogApi;
 Promise facade over the canonical Effect-owned runtime.
 
 ## References
+
+### WatchdogCompletingJobSchema
+
+Re-exports [WatchdogCompletingJobSchema](effect.md#watchdogcompletingjobschema)
+
+---
 
 ### WatchdogCancellationIntentSchema
 
@@ -260,6 +273,12 @@ Re-exports [EffectWatchdogOptions](effect.md#effectwatchdogoptions)
 ### EffectWatchdogExecutor
 
 Re-exports [EffectWatchdogExecutor](effect.md#effectwatchdogexecutor)
+
+---
+
+### WatchdogCompletingJob
+
+Re-exports [WatchdogCompletingJob](effect.md#watchdogcompletingjob)
 
 ---
 
@@ -407,6 +426,24 @@ Re-exports [WatchdogTickResult](effect.md#watchdogtickresult)
 
 Re-exports
 [WatchdogTransactionalProjection](effect.md#watchdogtransactionalprojection)
+
+---
+
+### WatchdogWakeState
+
+Re-exports [WatchdogWakeState](effect.md#watchdogwakestate)
+
+---
+
+### WatchdogRetryPolicy
+
+Re-exports [WatchdogRetryPolicy](effect.md#watchdogretrypolicy)
+
+---
+
+### WatchdogAttempt
+
+Re-exports [WatchdogAttempt](effect.md#watchdogattempt)
 
 ---
 

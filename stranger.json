@@ -20,6 +20,10 @@
     "package/dist/internal/lane.js",
     "package/dist/internal/promise-watchdog-host.d.ts",
     "package/dist/internal/promise-watchdog-host.js",
+    "package/dist/internal/recovery.d.ts",
+    "package/dist/internal/recovery.js",
+    "package/dist/internal/retry.d.ts",
+    "package/dist/internal/retry.js",
     "package/dist/internal/runtime.d.ts",
     "package/dist/internal/runtime.js",
     "package/dist/internal/sqlite-store.d.ts",
@@ -38,7 +42,7 @@
     "package/docs/api/postgres.md",
     "package/package.json"
   ],
-  "localDependencies": ["../cairn"],
+  "localDependencies": ["../almanac", "../cairn"],
   "runtimeFixture": "test/stranger/runtime.mjs",
   "typechecks": [
     {

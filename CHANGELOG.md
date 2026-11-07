@@ -1,5 +1,15 @@
 # @fungi.computer/watchdog
 
+## 0.1.1
+
+### Patch Changes
+
+- Changes since 0.1.0:
+
+  - fix(durability): give Watchdog delivery and timer readiness
+  - fix(durability): preserve retry decisions and drain ownership across restart
+  - fix(watchdog): retain execution decisions across settlement failures
+
 ## 0.1.0
 
 ### Minor Changes

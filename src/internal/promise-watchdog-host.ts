@@ -17,9 +17,18 @@ export const adaptPromiseWatchdogHost = (
         catch: (error) => new WatchdogError("liveness_unavailable", error),
       }),
     executor: {
-      execute: (job) =>
+      retryPolicy: (job) => {
+        const policy = options.retryPolicy;
+        return policy === undefined
+          ? Effect.succeed(undefined)
+          : Effect.tryPromise({
+              try: () => policy(job),
+              catch: (error) => new WatchdogError("execution_failed", error),
+            });
+      },
+      execute: (job, attempt) =>
         Effect.tryPromise({
-          try: (signal) => options.execute(job, signal),
+          try: (signal) => options.execute(job, signal, attempt),
           catch: () => new WatchdogError("execution_failed"),
         }),
     },

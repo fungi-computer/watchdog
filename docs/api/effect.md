@@ -10,6 +10,54 @@
 
 ## Type Aliases
 
+### WatchdogWakeState
+
+```ts
+type WatchdogWakeState = Readonly<{
+  pending: boolean;
+  nextWakeAt: number | null;
+}>;
+```
+
+Immediate reconciliation and the earliest future durable deadline.
+
+---
+
+### WatchdogRetryPolicy
+
+```ts
+type WatchdogRetryPolicy = Readonly<{
+  baseMs: number;
+  maxMs: number;
+  limit:
+    | Readonly<{
+        maxAttempts: number;
+      }>
+    | Readonly<{
+        deadlineAt: number;
+      }>;
+}>;
+```
+
+Bounded receiver policy selected by the executor's existing delivery owner.
+
+---
+
+### WatchdogAttempt
+
+```ts
+type WatchdogAttempt = Readonly<{
+  count: number;
+  status: "admitted" | "exhausted";
+  final: boolean;
+}>;
+```
+
+Reservation committed before receiver I/O; exhausted work may only finish its
+receipt.
+
+---
+
 ### WatchdogQueuedJob
 
 ```ts
@@ -17,6 +65,18 @@ type WatchdogQueuedJob = Schema.Schema.Type<typeof WatchdogQueuedJobSchema>;
 ```
 
 Generic durable work waiting for execution.
+
+---
+
+### WatchdogCompletingJob
+
+```ts
+type WatchdogCompletingJob = Schema.Schema.Type<
+  typeof WatchdogCompletingJobSchema
+>;
+```
+
+Durable decision awaiting its owner projection, never executor replay.
 
 ---
 
@@ -96,6 +156,10 @@ type WatchdogCancellationDecision =
       intent: WatchdogCancellationIntent;
     }>
   | Readonly<{
+      status: "decided";
+      outcome: WatchdogSettledJob["outcome"];
+    }>
+  | Readonly<{
       status: "conflict" | "missing";
     }>;
 ```
@@ -108,9 +172,17 @@ Result of recording an owner cancellation in its surrounding transaction.
 
 ```ts
 type WatchdogTransactionalProjection = Readonly<{
+  wakeState: (now) => WatchdogWakeState;
+  readJob: (jobId) =>
+    | Readonly<{
+        state: WatchdogStoredJob["state"];
+        notBefore: number;
+      }>
+    | undefined;
   readQueueHead: (queue) => WatchdogQueueHead;
   readLatestSettledJob: (queue) => WatchdogSettledJob | undefined;
   enqueueAcceptedJob: (job) => void;
+  expediteQueuedJob: (jobId, now) => boolean;
   recordCancellationIntent: (intent) => WatchdogCancellationDecision;
 }>;
 ```
@@ -136,7 +208,8 @@ Result of reading one generic job and its cancellation state.
 type WatchdogQueueHead = Schema.Schema.Type<typeof WatchdogQueueHeadSchema>;
 ```
 
-Current queued or running job for one queue, excluding terminal history.
+Queue occupancy: completing work remains running here until its projection
+commits. Read the job for its exact lifecycle state.
 
 ---
 
@@ -205,7 +278,15 @@ Result of recording a cancellation through the asynchronous runtime.
 
 ```ts
 type EffectWatchdogExecutor = Readonly<{
-  execute: (job) => Effect.Effect<WatchdogExecutionDecision, WatchdogError>;
+  replaySafe?: (job) => boolean;
+  retryPolicy?: (
+    job,
+  ) => Effect.Effect<WatchdogRetryPolicy | undefined, WatchdogError>;
+  execute: (
+    job,
+    attempt,
+  ) => Effect.Effect<WatchdogExecutionDecision, WatchdogError>;
+  isDrained?: (job) => Effect.Effect<boolean, WatchdogError>;
 }>;
 ```
 
@@ -299,7 +380,14 @@ Watchdog neither treats it as alive nor fabricates a disappearance.
 ```ts
 type WatchdogTickResult =
   | Readonly<{
+      status: "requeued";
+      jobId: string;
+    }>
+  | Readonly<{
       status: "busy";
+    }>
+  | Readonly<{
+      status: "stopped";
     }>
   | Readonly<{
       status: "no_ready";
@@ -346,17 +434,19 @@ One bounded refusal batch; call again only while more is true.
 
 ```ts
 type WatchdogRuntimeEffect = Readonly<{
-  hasPendingWork: Effect.Effect<boolean, WatchdogError>;
+  wakeState: (now) => Effect.Effect<WatchdogWakeState, WatchdogError>;
   ingest: (job) => Effect.Effect<WatchdogIngestResult, WatchdogError>;
   read: (jobId) => Effect.Effect<WatchdogReadResult, WatchdogError>;
   readQueueHead: (queue) => Effect.Effect<WatchdogQueueHead, WatchdogError>;
   readSettled: (
     limit,
     afterSequence?,
+    lane?,
   ) => Effect.Effect<readonly WatchdogSettledRecord[], WatchdogError>;
   tick: () => Effect.Effect<WatchdogTickResult, WatchdogError>;
   cancel: (input) => Effect.Effect<WatchdogCancellationResult, WatchdogError>;
   failLane: (input) => Effect.Effect<WatchdogLaneFailureResult, WatchdogError>;
+  close: Effect.Effect<void, WatchdogError>;
   purge: (queue) => Effect.Effect<void, WatchdogError>;
   transactional: WatchdogTransactionalProjection;
 }>;
@@ -388,9 +478,11 @@ const WatchdogQueuedJobSchema: Struct<{
   lane: String;
   priority: Int;
   payload: Unknown;
+  notBefore: optionalKey<Int>;
   recovery: optional<
     Struct<{
       maxRecoveries: Int;
+      windowMs: optionalKey<Int>;
     }>
   >;
   state: Literal<"queued">;
@@ -398,6 +490,40 @@ const WatchdogQueuedJobSchema: Struct<{
 ```
 
 The public queued-job grammar. Payload is deliberately uninterpreted.
+
+---
+
+### WatchdogCompletingJobSchema
+
+```ts
+const WatchdogCompletingJobSchema: Struct<{
+  jobId: String;
+  queue: String;
+  lane: String;
+  priority: Int;
+  payload: Unknown;
+  notBefore: optionalKey<Int>;
+  recovery: optional<
+    Struct<{
+      maxRecoveries: Int;
+      windowMs: optionalKey<Int>;
+    }>
+  >;
+  outcome: Literals<
+    readonly [
+      "completed",
+      "failed",
+      "cancelled",
+      "outcome_unknown",
+      "interrupted",
+    ]
+  >;
+  failureReason: optionalKey<String>;
+  state: Literal<"completing">;
+}>;
+```
+
+Execution has decided; its atomic owner projection has not committed yet.
 
 ---
 
@@ -410,12 +536,13 @@ const WatchdogSettledJobSchema: Struct<{
   lane: String;
   priority: Int;
   payload: Unknown;
+  notBefore: optionalKey<Int>;
   recovery: optional<
     Struct<{
       maxRecoveries: Int;
+      windowMs: optionalKey<Int>;
     }>
   >;
-  state: Literal<"settled">;
   outcome: Literals<
     readonly [
       "completed",
@@ -426,6 +553,7 @@ const WatchdogSettledJobSchema: Struct<{
     ]
   >;
   failureReason: optionalKey<String>;
+  state: Literal<"settled">;
 }>;
 ```
 
@@ -442,9 +570,11 @@ const WatchdogRunningJobSchema: Struct<{
   lane: String;
   priority: Int;
   payload: Unknown;
+  notBefore: optionalKey<Int>;
   recovery: optional<
     Struct<{
       maxRecoveries: Int;
+      windowMs: optionalKey<Int>;
     }>
   >;
   state: Literal<"running">;
@@ -466,9 +596,11 @@ const WatchdogStoredJobSchema: Union<
       lane: String;
       priority: Int;
       payload: Unknown;
+      notBefore: optionalKey<Int>;
       recovery: optional<
         Struct<{
           maxRecoveries: Int;
+          windowMs: optionalKey<Int>;
         }>
       >;
       state: Literal<"queued">;
@@ -479,9 +611,11 @@ const WatchdogStoredJobSchema: Union<
       lane: String;
       priority: Int;
       payload: Unknown;
+      notBefore: optionalKey<Int>;
       recovery: optional<
         Struct<{
           maxRecoveries: Int;
+          windowMs: optionalKey<Int>;
         }>
       >;
       state: Literal<"running">;
@@ -492,12 +626,13 @@ const WatchdogStoredJobSchema: Union<
       lane: String;
       priority: Int;
       payload: Unknown;
+      notBefore: optionalKey<Int>;
       recovery: optional<
         Struct<{
           maxRecoveries: Int;
+          windowMs: optionalKey<Int>;
         }>
       >;
-      state: Literal<"settled">;
       outcome: Literals<
         readonly [
           "completed",
@@ -508,6 +643,32 @@ const WatchdogStoredJobSchema: Union<
         ]
       >;
       failureReason: optionalKey<String>;
+      state: Literal<"completing">;
+    }>,
+    Struct<{
+      jobId: String;
+      queue: String;
+      lane: String;
+      priority: Int;
+      payload: Unknown;
+      notBefore: optionalKey<Int>;
+      recovery: optional<
+        Struct<{
+          maxRecoveries: Int;
+          windowMs: optionalKey<Int>;
+        }>
+      >;
+      outcome: Literals<
+        readonly [
+          "completed",
+          "failed",
+          "cancelled",
+          "outcome_unknown",
+          "interrupted",
+        ]
+      >;
+      failureReason: optionalKey<String>;
+      state: Literal<"settled">;
     }>,
   ]
 >;
@@ -522,6 +683,9 @@ The complete public job lifecycle grammar.
 ```ts
 const WatchdogExecutionDecisionSchema: Union<
   readonly [
+    Struct<{
+      kind: Literal<"retry">;
+    }>,
     Struct<{
       kind: Literal<"completed">;
     }>,
@@ -568,8 +732,10 @@ const WatchdogReadResultSchema: Union<readonly [Struct<{
      lane: String;
      priority: Int;
      payload: Unknown;
+     notBefore: optionalKey<Int>;
      recovery: optional<Struct<{
         maxRecoveries: ...;
+        windowMs: ...;
      }>>;
      state: Literal<"queued">;
    }>, Struct<{
@@ -578,8 +744,10 @@ const WatchdogReadResultSchema: Union<readonly [Struct<{
      lane: String;
      priority: Int;
      payload: Unknown;
+     notBefore: optionalKey<Int>;
      recovery: optional<Struct<{
         maxRecoveries: ...;
+        windowMs: ...;
      }>>;
      state: Literal<"running">;
    }>, Struct<{
@@ -588,12 +756,28 @@ const WatchdogReadResultSchema: Union<readonly [Struct<{
      lane: String;
      priority: Int;
      payload: Unknown;
+     notBefore: optionalKey<Int>;
      recovery: optional<Struct<{
         maxRecoveries: ...;
+        windowMs: ...;
      }>>;
-     state: Literal<"settled">;
      outcome: Literals<readonly ["completed", "failed", "cancelled", "outcome_unknown", "interrupted"]>;
      failureReason: optionalKey<String>;
+     state: Literal<"completing">;
+   }>, Struct<{
+     jobId: String;
+     queue: String;
+     lane: String;
+     priority: Int;
+     payload: Unknown;
+     notBefore: optionalKey<Int>;
+     recovery: optional<Struct<{
+        maxRecoveries: ...;
+        windowMs: ...;
+     }>>;
+     outcome: Literals<readonly ["completed", "failed", "cancelled", "outcome_unknown", "interrupted"]>;
+     failureReason: optionalKey<String>;
+     state: Literal<"settled">;
   }>]>;
   cancellation: Union<readonly [Struct<{
      status: Literal<"absent">;
@@ -660,6 +844,18 @@ Results returned by idempotent public ingest.
 const WatchdogCancellationResultSchema: Union<
   readonly [
     Struct<{
+      status: Literal<"decided">;
+      outcome: Literals<
+        readonly [
+          "completed",
+          "failed",
+          "cancelled",
+          "outcome_unknown",
+          "interrupted",
+        ]
+      >;
+    }>,
+    Struct<{
       status: Literals<readonly ["recorded", "replayed"]>;
     }>,
     Struct<{
@@ -725,7 +921,10 @@ Construct two private single-flight slots over the same owner and job table.
 
 ```ts
 function makeRuntime(options): Effect<Readonly<{
-  hasPendingWork: Effect<boolean, WatchdogError>;
+  wakeState: (now) => Effect<Readonly<{
+     pending: boolean;
+     nextWakeAt: number | null;
+  }>, WatchdogError>;
   ingest: (job) => Effect<
      | {
      status: "queued";
@@ -742,19 +941,10 @@ function makeRuntime(options): Effect<Readonly<{
         lane: string;
         priority: number;
         payload: unknown;
+        notBefore?: number;
         recovery?: {
            maxRecoveries: ...;
-        };
-        state: "queued";
-      }
-        | {
-        jobId: string;
-        queue: string;
-        lane: string;
-        priority: number;
-        payload: unknown;
-        recovery?: {
-           maxRecoveries: ...;
+           windowMs?: ...;
         };
         state: "running";
       }
@@ -764,12 +954,42 @@ function makeRuntime(options): Effect<Readonly<{
         lane: string;
         priority: number;
         payload: unknown;
+        notBefore?: number;
         recovery?: {
            maxRecoveries: ...;
+           windowMs?: ...;
         };
-        state: "settled";
+        state: "queued";
+      }
+        | {
+        jobId: string;
+        queue: string;
+        lane: string;
+        priority: number;
+        payload: unknown;
+        notBefore?: number;
+        recovery?: {
+           maxRecoveries: ...;
+           windowMs?: ...;
+        };
         outcome: "failed" | "completed" | "interrupted" | "cancelled" | "outcome_unknown";
         failureReason?: string;
+        state: "completing";
+      }
+        | {
+        jobId: string;
+        queue: string;
+        lane: string;
+        priority: number;
+        payload: unknown;
+        notBefore?: number;
+        recovery?: {
+           maxRecoveries: ...;
+           windowMs?: ...;
+        };
+        outcome: "failed" | "completed" | "interrupted" | "cancelled" | "outcome_unknown";
+        failureReason?: string;
+        state: "settled";
       };
      cancellation:   | {
         status: "absent";
@@ -795,7 +1015,7 @@ function makeRuntime(options): Effect<Readonly<{
      jobId: string;
      cancellationRequested: boolean;
   }, WatchdogError>;
-  readSettled: (limit, afterSequence?) => Effect<readonly Readonly<{
+  readSettled: (limit, afterSequence?, lane?) => Effect<readonly Readonly<{
      sequence: number;
      job: {
         jobId: string;
@@ -803,18 +1023,24 @@ function makeRuntime(options): Effect<Readonly<{
         lane: string;
         priority: number;
         payload: unknown;
+        notBefore?: number;
         recovery?: {
            maxRecoveries: ...;
+           windowMs?: ...;
         };
-        state: "settled";
         outcome: "failed" | "completed" | "interrupted" | "cancelled" | "outcome_unknown";
         failureReason?: string;
+        state: "settled";
      };
   }>[], WatchdogError>;
   tick: () => Effect<WatchdogTickResult, WatchdogError>;
   cancel: (input) => Effect<
      | {
-     status: "replayed" | "recorded";
+     status: "decided";
+     outcome: "failed" | "completed" | "interrupted" | "cancelled" | "outcome_unknown";
+   }
+     | {
+     status: "recorded" | "replayed";
    }
      | {
      status: "missing" | "conflict";
@@ -823,6 +1049,7 @@ function makeRuntime(options): Effect<Readonly<{
      settled: number;
      more: boolean;
   }>, WatchdogError>;
+  close: Effect<void, WatchdogError>;
   purge: (queue) => Effect<void, WatchdogError>;
   transactional: WatchdogTransactionalProjection;
 }>, WatchdogError>;
@@ -838,19 +1065,26 @@ Construct a serial owner-local runtime.
 
 ##### Returns
 
-`Effect`\<`Readonly`\<\{ `hasPendingWork`: `Effect`\<`boolean`,
+`Effect`\<`Readonly`\<\{ `wakeState`: (`now`) => `Effect`\<`Readonly`\<\{
+`pending`: `boolean`; `nextWakeAt`: `number` \| `null`; \}\>,
 [`WatchdogError`](index.md#watchdogerror)\>; `ingest`: (`job`) => `Effect`\< \|
 \{ `status`: `"queued"`; \} \| \{ `status`: `"duplicate"`; \},
 [`WatchdogError`](index.md#watchdogerror)\>; `read`: (`jobId`) => `Effect`\< \|
 \{ `status`: `"found"`; `job`: \| \{ `jobId`: `string`; `queue`: `string`;
-`lane`: `string`; `priority`: `number`; `payload`: `unknown`; `recovery?`: \{
-`maxRecoveries`: ...; \}; `state`: `"queued"`; \} \| \{ `jobId`: `string`;
-`queue`: `string`; `lane`: `string`; `priority`: `number`; `payload`: `unknown`;
-`recovery?`: \{ `maxRecoveries`: ...; \}; `state`: `"running"`; \} \| \{
+`lane`: `string`; `priority`: `number`; `payload`: `unknown`; `notBefore?`:
+`number`; `recovery?`: \{ `maxRecoveries`: ...; `windowMs?`: ...; \}; `state`:
+`"running"`; \} \| \{ `jobId`: `string`; `queue`: `string`; `lane`: `string`;
+`priority`: `number`; `payload`: `unknown`; `notBefore?`: `number`; `recovery?`:
+\{ `maxRecoveries`: ...; `windowMs?`: ...; \}; `state`: `"queued"`; \} \| \{
 `jobId`: `string`; `queue`: `string`; `lane`: `string`; `priority`: `number`;
-`payload`: `unknown`; `recovery?`: \{ `maxRecoveries`: ...; \}; `state`:
-`"settled"`; `outcome`: `"failed"` \| `"completed"` \| `"interrupted"` \|
-`"cancelled"` \| `"outcome_unknown"`; `failureReason?`: `string`; \};
+`payload`: `unknown`; `notBefore?`: `number`; `recovery?`: \{ `maxRecoveries`:
+...; `windowMs?`: ...; \}; `outcome`: `"failed"` \| `"completed"` \|
+`"interrupted"` \| `"cancelled"` \| `"outcome_unknown"`; `failureReason?`:
+`string`; `state`: `"completing"`; \} \| \{ `jobId`: `string`; `queue`:
+`string`; `lane`: `string`; `priority`: `number`; `payload`: `unknown`;
+`notBefore?`: `number`; `recovery?`: \{ `maxRecoveries`: ...; `windowMs?`: ...;
+\}; `outcome`: `"failed"` \| `"completed"` \| `"interrupted"` \| `"cancelled"`
+\| `"outcome_unknown"`; `failureReason?`: `string`; `state`: `"settled"`; \};
 `cancellation`: \| \{ `status`: `"absent"`; \} \| \{ `status`: `"present"`;
 `cancellation`: \{ `jobId`: `string`; `cancellationId`: `string`;
 `onlyIfQueued?`: ... \| ... \| ...; \}; \}; \} \| \{ `status`: `"missing"`; \},
@@ -858,18 +1092,22 @@ Construct a serial owner-local runtime.
 `Effect`\< \| \{ `state`: `"idle"`; \} \| \{ `state`: `"running"` \| `"queued"`;
 `jobId`: `string`; `cancellationRequested`: `boolean`; \},
 [`WatchdogError`](index.md#watchdogerror)\>; `readSettled`: (`limit`,
-`afterSequence?`) => `Effect`\<readonly `Readonly`\<\{ `sequence`: `number`;
-`job`: \{ `jobId`: `string`; `queue`: `string`; `lane`: `string`; `priority`:
-`number`; `payload`: `unknown`; `recovery?`: \{ `maxRecoveries`: ...; \};
-`state`: `"settled"`; `outcome`: `"failed"` \| `"completed"` \| `"interrupted"`
-\| `"cancelled"` \| `"outcome_unknown"`; `failureReason?`: `string`; \}; \}\>[],
+`afterSequence?`, `lane?`) => `Effect`\<readonly `Readonly`\<\{ `sequence`:
+`number`; `job`: \{ `jobId`: `string`; `queue`: `string`; `lane`: `string`;
+`priority`: `number`; `payload`: `unknown`; `notBefore?`: `number`; `recovery?`:
+\{ `maxRecoveries`: ...; `windowMs?`: ...; \}; `outcome`: `"failed"` \|
+`"completed"` \| `"interrupted"` \| `"cancelled"` \| `"outcome_unknown"`;
+`failureReason?`: `string`; `state`: `"settled"`; \}; \}\>[],
 [`WatchdogError`](index.md#watchdogerror)\>; `tick`: () =>
 `Effect`\<[`WatchdogTickResult`](#watchdogtickresult),
 [`WatchdogError`](index.md#watchdogerror)\>; `cancel`: (`input`) => `Effect`\<
-\| \{ `status`: `"replayed"` \| `"recorded"`; \} \| \{ `status`: `"missing"` \|
-`"conflict"`; \}, [`WatchdogError`](index.md#watchdogerror)\>; `failLane`:
-(`input`) => `Effect`\<`Readonly`\<\{ `settled`: `number`; `more`: `boolean`;
-\}\>, [`WatchdogError`](index.md#watchdogerror)\>; `purge`: (`queue`) =>
+\| \{ `status`: `"decided"`; `outcome`: `"failed"` \| `"completed"` \|
+`"interrupted"` \| `"cancelled"` \| `"outcome_unknown"`; \} \| \{ `status`:
+`"recorded"` \| `"replayed"`; \} \| \{ `status`: `"missing"` \| `"conflict"`;
+\}, [`WatchdogError`](index.md#watchdogerror)\>; `failLane`: (`input`) =>
+`Effect`\<`Readonly`\<\{ `settled`: `number`; `more`: `boolean`; \}\>,
+[`WatchdogError`](index.md#watchdogerror)\>; `close`: `Effect`\<`void`,
+[`WatchdogError`](index.md#watchdogerror)\>; `purge`: (`queue`) =>
 `Effect`\<`void`, [`WatchdogError`](index.md#watchdogerror)\>; `transactional`:
 [`WatchdogTransactionalProjection`](#watchdogtransactionalprojection); \}\>,
 [`WatchdogError`](index.md#watchdogerror)\>

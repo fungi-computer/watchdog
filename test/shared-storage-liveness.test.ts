@@ -20,6 +20,7 @@ it("preserves full actor lanes and the 512-character boundary in fresh shared SQ
   try {
     for (const sql of schemaStatements(false)) sqlite.exec(sql);
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: (statement) =>
         Promise.resolve(
           Schema.decodeUnknownSync(Rows)(
@@ -87,6 +88,7 @@ it("leaves a shared running claim intact when its native liveness query fails", 
     for (const sql of schemaStatements(false)) sqlite.exec(sql);
     let failProbe = false;
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: (statement) => {
         if (failProbe && statement.text.includes("AS alive"))
           return Promise.reject(new Error("database disconnected"));
@@ -162,6 +164,7 @@ it("rechecks the private lease before invoking an executor after a suspended cla
     let now = 1_000;
     let calls = 0;
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: (statement) => {
         const rows = Schema.decodeUnknownSync(Rows)(
           sqlite
@@ -211,6 +214,7 @@ it("rejects a refused recovery against an unchanged claim whose lease was renewe
   try {
     for (const sql of schemaStatements(false)) sqlite.exec(sql);
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: (statement) => {
         const rows = Schema.decodeUnknownSync(Rows)(
           sqlite
@@ -270,6 +274,7 @@ it("atomically fails only the requested lane through the shared SQL runtime", as
   try {
     for (const sql of schemaStatements(false)) sqlite.exec(sql);
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: (statement) =>
         Promise.resolve(
           Schema.decodeUnknownSync(Rows)(
@@ -328,6 +333,7 @@ function sharedSqliteFixture() {
   );
   const statements: string[] = [];
   const database: SqlDatabase = {
+    dialect: "sqlite",
     query: (statement) => {
       statements.push(statement.text);
       return Promise.resolve(
@@ -526,6 +532,7 @@ it("forgets a delayed claim reply after rereading the lane's committed refusal",
     release = resolve;
   });
   const database: SqlDatabase = {
+    dialect: "sqlite",
     query: async (statement) => {
       const rows = await fixture.database.query(statement);
       if (statement.text.includes("claim_token=CASE")) {
@@ -600,6 +607,7 @@ it.each(["queued", "missing"] as const)(
     let holdRead = false;
     let renewals = 0;
     const database: SqlDatabase = {
+      dialect: "sqlite",
       query: async (statement) => {
         const rows = await fixture.database.query(statement);
         if (statement.text.includes("SET lease_until=")) renewals++;
@@ -661,3 +669,188 @@ it.each(["queued", "missing"] as const)(
     }
   },
 );
+
+it("reopens shared completing work without a lease, execution or recovery charge", async () => {
+  const fixture = sharedSqliteFixture();
+  let failSettlement = true;
+  let executions = 0;
+  let now = 1000;
+  const database: SqlDatabase = {
+    ...fixture.database,
+    query: (statement) => {
+      if (
+        failSettlement &&
+        statement.text.includes("SET state='settled' WHERE")
+      )
+        return Promise.reject(new Error("settlement unavailable"));
+      return fixture.database.query(statement);
+    },
+  };
+  const options = {
+    now: () => now,
+    execute: () => {
+      executions += 1;
+      return Promise.resolve({ kind: "completed" as const });
+    },
+    wake: { recompute: () => Promise.resolve() },
+  };
+  try {
+    const first = createAsyncRuntime(database, options);
+    await first.ingest({
+      jobId: "decided",
+      queue: "q",
+      lane: "test",
+      priority: 0,
+      payload: null,
+      recovery: { maxRecoveries: 0 },
+      state: "queued",
+    });
+    await expect(first.tick()).rejects.toMatchObject({
+      cause: "store_unavailable",
+    });
+    expect(
+      fixture.sqlite
+        .prepare(
+          "SELECT state, outcome, lease_until, recovery_count FROM watchdog_jobs",
+        )
+        .get(),
+    ).toEqual({
+      state: "completing",
+      outcome: "completed",
+      lease_until: null,
+      recovery_count: 0,
+    });
+    now += 1_000_000;
+    const reopened = createAsyncRuntime(database, options);
+    await expect(
+      reopened.cancel({ jobId: "decided", cancellationId: "too-late" }),
+    ).resolves.toEqual({ status: "decided", outcome: "completed" });
+    await expect(reopened.tick()).rejects.toMatchObject({
+      cause: "store_unavailable",
+    });
+    failSettlement = false;
+    await expect(reopened.tick()).resolves.toMatchObject({
+      status: "settled",
+      job: { outcome: "completed" },
+    });
+    expect(executions).toBe(1);
+  } finally {
+    fixture.sqlite.close();
+  }
+});
+
+it.each([
+  { thirdLossAt: 360_003, expected: "settled" },
+  { thirdLossAt: 500_001, expected: "requeued" },
+])(
+  "uses the durable recovery window with shared-store leases at $thirdLossAt",
+  async ({ thirdLossAt, expected }) => {
+    const fixture = sharedSqliteFixture();
+    let now = 0;
+    const state = openAsyncStore(fixture.database, () => now);
+    try {
+      await Effect.runPromise(
+        state.store.ingest({
+          jobId: "windowed",
+          queue: "q",
+          lane: "test",
+          priority: 0,
+          payload: null,
+          state: "queued",
+          recovery: { maxRecoveries: 2, windowMs: 300_000 },
+        }),
+      );
+      await Effect.runPromise(state.store.selectAndClaim("claim-0"));
+      for (const [index, at] of [120_001, 240_002, thirdLossAt].entries()) {
+        now = at;
+        const claim = await Effect.runPromise(state.store.nextRunningClaim());
+        if (claim === undefined)
+          throw new Error("Expected a durable running claim");
+        const result = await Effect.runPromise(
+          state.store.reconcileDisappearedClaim(claim),
+        );
+        expect(result.status).toBe(index < 2 ? "requeued" : expected);
+        if (index < 2)
+          await Effect.runPromise(
+            state.store.selectAndClaim(`claim-${String(index + 1)}`),
+          );
+      }
+    } finally {
+      fixture.sqlite.close();
+    }
+  },
+);
+
+it("keeps future shared queue heads asleep and wakes at a live owner's lease", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const Rows = Schema.Array(
+    Schema.Record(
+      Schema.String,
+      Schema.Union([Schema.String, Schema.Number, Schema.Null]),
+    ),
+  );
+  let now = 1_000;
+  try {
+    for (const sql of schemaStatements(false)) sqlite.exec(sql);
+    const database: SqlDatabase = {
+      dialect: "sqlite",
+      query: (statement) =>
+        Promise.resolve(
+          Schema.decodeUnknownSync(Rows)(
+            sqlite
+              .prepare(statement.text.replace(/\$(\d+)/gu, "?$1"))
+              .all(...statement.values),
+          ),
+        ),
+    };
+    const runtime = createAsyncRuntime(database, {
+      execute: () => Promise.resolve({ kind: "completed" }),
+      wake: { recompute: () => Promise.resolve() },
+      now: () => now,
+    });
+    for (const [jobId, queue, notBefore] of [
+      ["head", "ordered", 2_000],
+      ["tail", "ordered", 0],
+      ["other", "independent", 0],
+    ] as const)
+      await runtime.ingest({
+        jobId,
+        queue,
+        notBefore,
+        lane: "test",
+        priority: 0,
+        payload: null,
+        state: "queued",
+      });
+    await expect(runtime.tick()).resolves.toMatchObject({
+      job: { jobId: "other" },
+    });
+    await expect(runtime.tick()).resolves.toEqual({ status: "no_ready" });
+    await expect(runtime.wakeState(now)).resolves.toEqual({
+      pending: false,
+      nextWakeAt: 2_000,
+    });
+    // Claim through the actual store but keep the lease alive; another owner
+    // must wake at that lease, not run the blocked tail or spin immediately.
+    now = 2_000;
+    const state = openAsyncStore(database, () => now);
+    const claim = await Effect.runPromise(
+      state.store.selectAndClaim("sleeping-owner"),
+    );
+    expect(claim).toMatchObject({ status: "claimed", job: { jobId: "head" } });
+    const lease = sqlite
+      .prepare("SELECT lease_until FROM watchdog_jobs WHERE job_id='head'")
+      .get()?.lease_until;
+    await expect(runtime.wakeState(now)).resolves.toEqual({
+      pending: false,
+      nextWakeAt: lease,
+    });
+    await expect(runtime.tick()).resolves.toEqual({ status: "no_ready" });
+    await runtime.cancel({ jobId: "head", cancellationId: "cancel-running" });
+    await expect(runtime.wakeState(now)).resolves.toMatchObject({
+      pending: true,
+    });
+  } finally {
+    sqlite.close();
+  }
+});

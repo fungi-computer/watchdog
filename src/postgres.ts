@@ -33,6 +33,7 @@ export function createPostgresWatchdog(
 ): PostgresWatchdog {
   const runtime = createAsyncRuntime(
     {
+      dialect: "postgres",
       clock:
         options.now === undefined
           ? "EXTRACT(EPOCH FROM clock_timestamp())*1000"

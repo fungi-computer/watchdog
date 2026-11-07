@@ -57,9 +57,9 @@ Open the shared Effect engine on a migrated PostgreSQL database.
 
 #### Parameters
 
-| Parameter | Type                                                                                                                                                                                                                                        |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `options` | `Readonly`\<\{ `execute`: [`WatchdogExecutor`](index.md#watchdogexecutor); `wake`: `Readonly`\<\{ `recompute`: () => `Promise`\<`void`\>; \}\>; `now?`: () => `number`; \}\> & `Readonly`\<\{ `database`: `Pick`\<`Pool`, `"query"`\>; \}\> |
+| Parameter | Type                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `options` | `Readonly`\<\{ `execute`: [`WatchdogExecutor`](index.md#watchdogexecutor); `retryPolicy?`: (`job`) => `Promise`\< \| `Readonly`\<\{ `baseMs`: `number`; `maxMs`: `number`; `limit`: `Readonly`\<...\> \| `Readonly`\<...\>; \}\> \| `undefined`\>; `wake`: `Readonly`\<\{ `recompute`: () => `Promise`\<`void`\>; \}\>; `now?`: () => `number`; \}\> & `Readonly`\<\{ `database`: `Pick`\<`Pool`, `"query"`\>; \}\> |
 
 #### Returns
 

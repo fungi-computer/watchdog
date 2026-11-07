@@ -2,7 +2,11 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
-import type { WatchdogExecutor, WatchdogRuntime } from "../index.js";
+import type {
+  WatchdogExecutor,
+  WatchdogRuntime,
+  WatchdogOptions,
+} from "../index.js";
 import { WatchdogError } from "./watchdog-error.js";
 import { bindWatchdogEngine } from "./runtime.js";
 import { openAsyncStore, heartbeatMs, attempt } from "./async-store.js";
@@ -12,6 +16,8 @@ import type { SqlDatabase } from "./async-sql.js";
 export type AsyncWatchdogOptions = Readonly<{
   /** Execute one claimed job; honour abort when its lease is lost. */
   execute: WatchdogExecutor;
+  /** Resolve the delivery owner policy before receiver attempt admission. */
+  retryPolicy?: WatchdogOptions["retryPolicy"];
   /** Recompute a durable wake after a transition commits. */
   wake: Readonly<{
     /** Arm the next durable owner wake. */
@@ -47,12 +53,21 @@ export function createAsyncRuntime(
     {
       isAlive: (job) => state.isAlive(job.jobId),
       executor: {
-        execute: (job) =>
+        retryPolicy: (job) => {
+          const policy = options.retryPolicy;
+          return policy === undefined
+            ? Effect.succeed(undefined)
+            : Effect.tryPromise({
+                try: () => policy(job),
+                catch: (error) => new WatchdogError("execution_failed", error),
+              });
+        },
+        execute: (job, reserved) =>
           renew(job.jobId).pipe(
             Effect.andThen(
               Effect.raceFirst(
                 Effect.tryPromise({
-                  try: (signal) => options.execute(job, signal),
+                  try: (signal) => options.execute(job, signal, reserved),
                   catch: () => new WatchdogError("execution_failed"),
                 }),
                 Effect.forever(
@@ -69,7 +84,7 @@ export function createAsyncRuntime(
     state.store,
   );
   return {
-    hasPendingWork: () => run(runtime.hasPendingWork),
+    wakeState: (now) => run(runtime.wakeState(now)),
     ingest: (job) => run(runtime.ingest(job)),
     read: (id) => run(runtime.read(id)),
     readQueueHead: (queue) => run(runtime.readQueueHead(queue)),

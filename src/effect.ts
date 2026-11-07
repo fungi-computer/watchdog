@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { bindWatchdogEngine } from "./internal/runtime.js";
@@ -25,6 +26,12 @@ const RecoveryCount = Schema.Int.check(
 );
 const RecoveryPolicy = Schema.Struct({
   maxRecoveries: RecoveryCount,
+  windowMs: Schema.optionalKey(
+    Schema.Int.check(
+      Schema.isGreaterThan(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
 });
 const PublicJobFields = {
   jobId: BoundedString,
@@ -32,8 +39,30 @@ const PublicJobFields = {
   lane: laneSchema,
   priority: Priority,
   payload: Schema.Unknown,
+  /** Earliest initial dispatch; replay never changes a retained deadline. */
+  notBefore: Schema.optionalKey(RecoveryCount),
   recovery: Schema.optional(RecoveryPolicy),
 };
+
+/** Immediate reconciliation and the earliest future durable deadline. */
+export type WatchdogWakeState = Readonly<{
+  pending: boolean;
+  nextWakeAt: number | null;
+}>;
+
+/** Bounded receiver policy selected by the executor's existing delivery owner. */
+export type WatchdogRetryPolicy = Readonly<{
+  baseMs: number;
+  maxMs: number;
+  limit: Readonly<{ maxAttempts: number }> | Readonly<{ deadlineAt: number }>;
+}>;
+
+/** Reservation committed before receiver I/O; exhausted work may only finish its receipt. */
+export type WatchdogAttempt = Readonly<{
+  count: number;
+  status: "admitted" | "exhausted";
+  final: boolean;
+}>;
 
 /** The public queued-job grammar. Payload is deliberately uninterpreted. */
 export const WatchdogQueuedJobSchema = Schema.Struct({
@@ -45,19 +74,33 @@ export type WatchdogQueuedJob = Schema.Schema.Type<
   typeof WatchdogQueuedJobSchema
 >;
 
+const Outcome = Schema.Literals([
+  "completed",
+  "failed",
+  "cancelled",
+  "outcome_unknown",
+  "interrupted",
+]);
+const DecidedJobFields = {
+  ...PublicJobFields,
+  outcome: Outcome,
+  failureReason: Schema.optionalKey(FailureReason),
+};
+
+/** Execution has decided; its atomic owner projection has not committed yet. */
+export const WatchdogCompletingJobSchema = Schema.Struct({
+  ...DecidedJobFields,
+  state: Schema.Literal("completing"),
+});
+/** Durable decision awaiting its owner projection, never executor replay. */
+export type WatchdogCompletingJob = Schema.Schema.Type<
+  typeof WatchdogCompletingJobSchema
+>;
+
 /** The public terminal-job grammar. */
 export const WatchdogSettledJobSchema = Schema.Struct({
-  ...PublicJobFields,
+  ...DecidedJobFields,
   state: Schema.Literal("settled"),
-  outcome: Schema.Literals([
-    "completed",
-    "failed",
-    "cancelled",
-    "outcome_unknown",
-    "interrupted",
-  ]),
-  /** Why a job failed or exhausted disappearance recovery, when known. */
-  failureReason: Schema.optionalKey(FailureReason),
 });
 /** Generic durable work with a terminal outcome. */
 export type WatchdogSettledJob = Schema.Schema.Type<
@@ -84,6 +127,7 @@ export type WatchdogRunningJob = Schema.Schema.Type<
 export const WatchdogStoredJobSchema = Schema.Union([
   WatchdogQueuedJobSchema,
   WatchdogRunningJobSchema,
+  WatchdogCompletingJobSchema,
   WatchdogSettledJobSchema,
 ]);
 /** Any publicly readable lifecycle state for a generic job. */
@@ -93,6 +137,7 @@ export type WatchdogStoredJob = Schema.Schema.Type<
 
 /** Terminal decisions returned by the execution adapter. */
 export const WatchdogExecutionDecisionSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("retry") }),
   Schema.Struct({ kind: Schema.Literal("completed") }),
   Schema.Struct({
     kind: Schema.Literal("failed"),
@@ -123,16 +168,27 @@ export type WatchdogCancellationDecision =
       status: "recorded" | "replayed";
       intent: WatchdogCancellationIntent;
     }>
+  | Readonly<{ status: "decided"; outcome: WatchdogSettledJob["outcome"] }>
   | Readonly<{ status: "conflict" | "missing" }>;
 
 /** Narrow synchronous seam for owner-atomic queue inspection, ingest, and cancellation. */
 export type WatchdogTransactionalProjection = Readonly<{
+  /** Read the same durable readiness for synchronous native host wake composition. */
+  wakeState: (now: number) => WatchdogWakeState;
+  /** Reads a job's exact lifecycle state and durable deadline in the owner transaction. */
+  readJob: (
+    jobId: string,
+  ) =>
+    | Readonly<{ state: WatchdogStoredJob["state"]; notBefore: number }>
+    | undefined;
   /** Reads the bounded current queue head inside an enclosing owner transaction. */
   readQueueHead: (queue: string) => WatchdogQueueHead;
   /** Reads the most recently settled job of one queue, if any. */
   readLatestSettledJob: (queue: string) => WatchdogSettledJob | undefined;
   /** Applies the same durable queued-row mutation as store.ingest. */
   enqueueAcceptedJob: (job: WatchdogQueuedJob) => void;
+  /** Expedite existing queued work without changing its charged attempt count. */
+  expediteQueuedJob: (jobId: string, now: number) => boolean;
   /** Records or replays cancellation without interpreting the payload. */
   recordCancellationIntent: (
     intent: WatchdogCancellationIntent,
@@ -169,7 +225,7 @@ export const WatchdogQueueHeadSchema = Schema.Union([
     cancellationRequested: Schema.Boolean,
   }),
 ]);
-/** Current queued or running job for one queue, excluding terminal history. */
+/** Queue occupancy: completing work remains running here until its projection commits. Read the job for its exact lifecycle state. */
 export type WatchdogQueueHead = Schema.Schema.Type<
   typeof WatchdogQueueHeadSchema
 >;
@@ -205,6 +261,7 @@ export type WatchdogIngestResult = Schema.Schema.Type<
 
 /** Results returned by durable cancellation recording. */
 export const WatchdogCancellationResultSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("decided"), outcome: Outcome }),
   Schema.Struct({ status: Schema.Literals(["recorded", "replayed"]) }),
   Schema.Struct({ status: Schema.Literals(["conflict", "missing"]) }),
 ]);
@@ -215,10 +272,21 @@ export type WatchdogCancellationResult = Schema.Schema.Type<
 
 /** Effect-native host executor for one generic running job. */
 export type EffectWatchdogExecutor = Readonly<{
+  /** Code-owned proof that consumption and every effect commit in one owner transaction. */
+  replaySafe?: (job: WatchdogRunningJob) => boolean;
+  /** Resolve the current delivery policy from the existing owner, outside a storage transaction. */
+  retryPolicy?: (
+    job: WatchdogRunningJob,
+  ) => Effect.Effect<WatchdogRetryPolicy | undefined, WatchdogError>;
   /** Runs one generic claimed job until a terminal decision. */
   execute: (
     job: WatchdogRunningJob,
+    attempt: WatchdogAttempt | undefined,
   ) => Effect.Effect<WatchdogExecutionDecision, WatchdogError>;
+  /** After interruption and scope release, prove foreign resources finished cleanup. */
+  isDrained?: (
+    job: WatchdogRunningJob,
+  ) => Effect.Effect<boolean, WatchdogError>;
 }>;
 
 /** Scalar grammar shared by native SQLite adapters and their storage owners. */
@@ -293,7 +361,9 @@ export type WatchdogLivenessUnknown = Readonly<{
 
 /** Result of one bounded deep tick. */
 export type WatchdogTickResult =
+  | Readonly<{ status: "requeued"; jobId: string }>
   | Readonly<{ status: "busy" }>
+  | Readonly<{ status: "stopped" }>
   | Readonly<{ status: "no_ready" }>
   | WatchdogLivenessUnknown
   | Readonly<{ status: "settled"; job: WatchdogSettledJob }>;
@@ -316,8 +386,8 @@ export type WatchdogLaneFailureResult = Readonly<{
 
 /** Effect-native Watchdog runtime surface. */
 export type WatchdogRuntimeEffect = Readonly<{
-  /** Whether any queued or running job still needs owner reconciliation. */
-  hasPendingWork: Effect.Effect<boolean, WatchdogError>;
+  /** Read readiness and the next deadline from the same durable work rows. */
+  wakeState: (now: number) => Effect.Effect<WatchdogWakeState, WatchdogError>;
   /** Persists one queued job. */
   ingest: (
     job: WatchdogQueuedJob,
@@ -332,6 +402,7 @@ export type WatchdogRuntimeEffect = Readonly<{
   readSettled: (
     limit: number,
     afterSequence?: number,
+    lane?: string,
   ) => Effect.Effect<readonly WatchdogSettledRecord[], WatchdogError>;
   /** Runs one bounded generic lifecycle tick. */
   tick: () => Effect.Effect<WatchdogTickResult, WatchdogError>;
@@ -345,6 +416,8 @@ export type WatchdogRuntimeEffect = Readonly<{
   failLane: (
     input: WatchdogLaneFailure,
   ) => Effect.Effect<WatchdogLaneFailureResult, WatchdogError>;
+  /** Stop dispatch, interrupt owned execution, and hand off only a proven drained claim. */
+  close: Effect.Effect<void, WatchdogError>;
   /** Removes queued jobs in one queue. */
   purge: (queue: string) => Effect.Effect<void, WatchdogError>;
   /** Joins accepted enqueue and cancellation to an existing owner transaction. */
@@ -393,6 +466,17 @@ export function makeRuntime(
       return Object.freeze({
         ...base,
         tickConcurrent: concurrent.tick,
+        close: Effect.all(
+          [Effect.exit(serial.close), Effect.exit(concurrent.close)],
+          { concurrency: 2 },
+        ).pipe(
+          Effect.flatMap((exits) => {
+            const failed = exits.find(Exit.isFailure);
+            return failed === undefined
+              ? Effect.void
+              : Effect.failCause(failed.cause);
+          }),
+        ),
         failLane: (input: WatchdogLaneFailure) =>
           input.lane === lane
             ? concurrent.failLane(input)
@@ -409,6 +493,9 @@ export function makeRuntime(
             ),
       });
     },
-    catch: (error) => new WatchdogError("store_unavailable", error),
+    catch: (error) =>
+      error instanceof WatchdogError
+        ? error
+        : new WatchdogError("store_unavailable", error),
   });
 }

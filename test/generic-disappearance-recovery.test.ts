@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import {
   Watchdog,
@@ -468,3 +468,72 @@ it("leaves a replacement whose only changed identity field is the claim token", 
     running.fixture.close();
   }
 });
+
+it.each([
+  { times: [1_000, 61_000, 62_000], executions: 3, outcome: "completed" },
+  { times: [1_000, 2_000, 3_000], executions: 2, outcome: "interrupted" },
+  { times: [1_000, 2_000, 0], executions: 2, outcome: "interrupted" },
+])(
+  "resets crash recovery only after real window expiry: $times",
+  async ({ times, executions, outcome }) => {
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const initial = await runningFixture({
+      jobId: "windowed",
+      queue: "q",
+      lane: "test",
+      priority: 0,
+      payload: null,
+      state: "queued",
+      recovery: { maxRecoveries: 2, windowMs: 60_000 },
+    });
+    const initialResult = initial.oldTick.catch((error: unknown) => error);
+    const held: { release: () => void; result: Promise<unknown> }[] = [];
+    let calls = 0;
+    let last: Awaited<ReturnType<typeof Watchdog.make>> | undefined;
+    try {
+      for (const at of times) {
+        now = at;
+        let release: () => void = () => undefined;
+        let started: () => void = () => undefined;
+        const waiting = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const dispatched = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        last = await Watchdog.make({
+          owner: initial.fixture.owner,
+          isAlive: () => Promise.resolve(false),
+          execute: async () => {
+            calls += 1;
+            started();
+            await waiting;
+            return { kind: "completed" };
+          },
+          wake: { recompute: () => Promise.resolve() },
+        });
+        const result = last.tick().catch((error: unknown) => error);
+        held.push({ release, result });
+        await Promise.race([dispatched, result]);
+      }
+      expect(calls).toBe(executions);
+      for (const execution of held) execution.release();
+      await Promise.all(held.map(({ result }) => result));
+      await expect(last?.read("windowed")).resolves.toMatchObject({
+        job: { state: "settled", outcome },
+      });
+      initial.release();
+      await expect(initialResult).resolves.toMatchObject({
+        cause: "settlement_rejected",
+      });
+    } finally {
+      for (const execution of held) execution.release();
+      initial.release();
+      await Promise.all(held.map(({ result }) => result));
+      await initialResult;
+      initial.fixture.close();
+      clock.mockRestore();
+    }
+  },
+);

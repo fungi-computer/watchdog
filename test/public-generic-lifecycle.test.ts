@@ -28,12 +28,18 @@ it("reconstructs and settles opaque work through the public Promise lifecycle", 
       isAlive: () => Promise.resolve(true),
       wake: { recompute: () => Promise.resolve() },
     });
-    await expect(acceptingRuntime.hasPendingWork()).resolves.toBe(false);
+    await expect(acceptingRuntime.wakeState(Date.now())).resolves.toEqual({
+      pending: false,
+      nextWakeAt: null,
+    });
     await expect(acceptingRuntime.ingest(queuedJob)).resolves.toEqual({
       status: "queued",
     });
 
-    await expect(acceptingRuntime.hasPendingWork()).resolves.toBe(true);
+    await expect(acceptingRuntime.wakeState(Date.now())).resolves.toEqual({
+      pending: true,
+      nextWakeAt: null,
+    });
     const reconstructedRuntime: WatchdogRuntime = await Watchdog.make({
       owner: fixture.owner,
       execute: (job) => {
@@ -41,9 +47,9 @@ it("reconstructs and settles opaque work through the public Promise lifecycle", 
         expect(job.payload).toEqual(queuedJob.payload);
         trace.push("execute");
         return reconstructedRuntime
-          .hasPendingWork()
+          .wakeState(Date.now())
           .then((pending) => {
-            expect(pending).toBe(true);
+            expect(pending).toEqual({ pending: true, nextWakeAt: null });
             return { kind: "completed" as const };
           })
           .finally(() => {
@@ -73,7 +79,10 @@ it("reconstructs and settles opaque work through the public Promise lifecycle", 
       throw new Error("Expected the opaque job to settle");
     expect(trace).toEqual(["execute", "finalize", "wake"]);
     expect(executions).toBe(1);
-    await expect(reconstructedRuntime.hasPendingWork()).resolves.toBe(false);
+    await expect(reconstructedRuntime.wakeState(Date.now())).resolves.toEqual({
+      pending: false,
+      nextWakeAt: null,
+    });
 
     const observedByFreshRuntime = await Watchdog.make({
       owner: fixture.owner,

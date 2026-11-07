@@ -7,8 +7,8 @@ asks your liveness probe what happened and recovers the work.
 
 Watchdog never looks inside a job. The payload, queue name and lane are opaque
 values you choose. Your code decides what a job means and how to run it.
-Watchdog owns the lifecycle: queued, running, settled. Claims, claim tokens and
-the SQL that moves rows between states stay private to the package.
+Watchdog owns the lifecycle: queued, running, completing, settled. Claims, claim
+tokens and the SQL that moves rows between states stay private to the package.
 
 Use it when you need work to survive a restart, run once per claim, and settle
 with an honest outcome, without writing your own state machine. It runs on any
@@ -95,13 +95,15 @@ In a Durable Object, `ctx.storage` is already the SQLite owner.
 ## Core concepts
 
 **Jobs.** A job has a `jobId`, a `queue`, a `lane`, an integer `priority`, an
-opaque JSON `payload` and an optional `recovery: { maxRecoveries }`. IDs and
-queue names are 1 to 256 characters; lanes are 1 to 512 characters. Owner-local
-construction can reserve one lane for concurrent delivery; otherwise the lane is
-stored without a scheduling policy. A job moves through three states:
+opaque JSON `payload` and an optional `recovery: { maxRecoveries, windowMs? }`.
+IDs and queue names are 1 to 256 characters; lanes are 1 to 512 characters.
+Owner-local construction can reserve one lane for concurrent delivery; otherwise
+the lane is stored without a scheduling policy. A job moves through four states:
 
 - `queued`: accepted and waiting.
 - `running`: claimed by one tick and handed to your executor.
+- `completing`: execution decided its outcome; settlement and its projection are
+  pending.
 - `settled`: finished, with an `outcome` of `completed`, `failed`, `cancelled`,
   `outcome_unknown` or `interrupted`, and an optional `failureReason`.
 
@@ -125,25 +127,50 @@ as `execution_failed` or `execution_interrupted`.
 - `isAlive(job)`: answers whether a running job's execution still exists.
 - `wake.recompute()`: arms your next timer or alarm after durable state changes.
 
-**Disappearance recovery.** Each tick first checks the oldest running claim. If
-`isAlive` returns `false`, the execution is gone. A job with recovery budget
-left goes back to `queued`. Otherwise it settles as `interrupted`. If `isAlive`
-throws, Watchdog does not guess. The claim stays as it is, and an otherwise idle
-tick reports `{ status: "liveness_unknown", jobId, reason }`.
+**Completion recovery.** An exact claim first records its outcome as
+`completing`. A separate transaction settles that decision and invokes the owner
+projection. If this transaction fails, the decision remains durable. Each tick
+retries one pending completion before taking new work. Failure surfaces
+immediately; the host owns bounded wake backoff. A restart never executes
+completing work again, probes its liveness or charges its recovery budget. Queue
+heads report it as `running` until settlement commits; `read(jobId)` reports
+`completing`.
+
+**Disappearance recovery.** After pending completion, a tick checks the oldest
+running claim. If `isAlive` returns `false`, the execution is gone. A job with
+recovery budget left goes back to `queued`. Otherwise it settles as
+`interrupted`. If `isAlive` throws, Watchdog does not guess. The claim stays as
+it is, and an otherwise idle tick reports
+`{ status: "liveness_unknown", jobId, reason }`.
+
+An optional positive `windowMs` resets the count when that much time has elapsed
+since the first charged recovery in the current window. Clock rollback does not
+reset it. Without a window, the count remains a lifetime budget for that job.
+
+**Effect owner shutdown.** The Effect runtime's `close` stops dispatch and
+interrupts its owned execution. After the executor scope ends, `isDrained(job)`
+must prove that foreign cleanup completed. Only then does Watchdog requeue its
+exact claim without charging recovery. An absent or false drain answer leaves
+the claim running and fails with `drain_failed`; reopening treats it as an
+unexpected disappearance. Durable cancellation wins over the handoff. An
+already-decided completion continues settlement. Further ticks return `stopped`.
+The production caller is Shiitake, whose run scope supplies bounded model/tool
+cleanup evidence. Promise runtimes do not expose this lifecycle operation.
 
 **Cancellation.** `cancel({ jobId, cancellationId })` records a durable
 cancellation. A queued job settles as `cancelled` on its next tick. A job the
 current runtime is executing is interrupted and settles as `cancelled`.
 Replaying the same `cancellationId` returns `replayed`. A different one returns
-`conflict`. Pass `onlyIfQueued: true` to refuse cancellation once a job has
-started.
+`conflict`. Once execution has durably decided, cancellation is a no-op and
+returns `{ status: "decided", outcome }`, including after settlement. Pass
+`onlyIfQueued: true` to refuse cancellation once a job has started.
 
-**Lane refusal.** `failLane({ lane, reason })` terminally settles queued and
-running work in that lane as `failed`, retaining each job and its bounded owner
-reason code. It handles at most 256 jobs per call, running jobs first, and
-returns `{ settled, more }`. Repeat only while `more` is true; 256 is a
-transition batch, not a cap on accepted work. Already settled history and other
-lanes stay intact. Once exhausted, another call returns
+**Lane refusal.** `failLane({ lane, reason })` terminally settles queued,
+running and completing work in that lane as `failed`, retaining each job and its
+bounded owner reason code. It handles at most 256 jobs per call, running jobs
+first, and returns `{ settled, more }`. Repeat only while `more` is true; 256 is
+a transition batch, not a cap on accepted work. Already settled history and
+other lanes stay intact. Once exhausted, another call returns
 `{ settled: 0, more: false }` and fires no projector. A later enqueue is new
 work, not a permanent refusal marker.
 
@@ -171,8 +198,25 @@ ingest, claim, cancellation, settlement, lane refusal, recovery and purge. Use
 it to keep a per-queue status row in step with Watchdog. A throw from `project`
 fails the transition.
 
-**Purge.** `purge(queue)` deletes every queued job in one queue. Running and
-settled jobs stay.
+**Purge.** `purge(queue)` deletes every queued job in one queue. Running,
+completing and settled jobs stay.
+
+## Scheduled work and delivery attempts
+
+A queued job may carry `notBefore`, an absolute millisecond deadline. Watchdog
+retains it as `not_before`; future queue heads hold their successors while
+independent queues proceed. `wakeState(now)` returns `{ pending, nextWakeAt }`
+from the same rows, including shared leases. Cancellation bypasses a future due
+time. Hosts schedule now when `pending` is true, otherwise at `nextWakeAt`.
+
+An executor may supply a code-owned `retryPolicy` with bounded backoff and
+either an attempt ceiling or absolute deadline. Watchdog increments
+`attempt_count` and records the fallback due time before execution. The executor
+receives the reserved attempt, returns `retry` to retain the same work, and
+receives an exhausted context without another receiver attempt when the budget
+ends. Delivery disappearance retains that charge and does not borrow Agent
+recovery quotas. The native Effect executor's `replaySafe` predicate is for work
+whose entire effect is one owner transaction, such as extension timers.
 
 ## Concurrent owner-local delivery
 
@@ -185,34 +229,40 @@ partition. Both slots require the queue head across lanes, ordered by running
 first, then priority descending and enqueue sequence ascending. Cancelled queued
 jobs can settle past a busy queue without executing.
 
-The Effect runtime's `readSettled(limit, afterSequence)` exposes the serial
-partition in enqueue order. A prefix fence withholds later settlements until all
-earlier serial jobs settle or are purged. Concurrent receipts never consume a
-page slot; they remain readable by job ID. `hasPendingWork` still covers both
-partitions. These owner-local operations require no stored schema change and do
-not change the D1 or PostgreSQL adapters.
+The Effect runtime's `readSettled(limit, afterSequence, lane?)` exposes the
+serial partition in enqueue order. A prefix fence withholds later settlements
+until all earlier jobs in the selected partition and optional lane settle or are
+purged. Concurrent receipts never consume a page slot; they remain readable by
+job ID. `wakeState(now)` still covers both partitions. These owner-local
+operations require no stored schema change and do not change the D1 or
+PostgreSQL adapters.
 
 ## Shared D1 and PostgreSQL storage
 
 `@fungi.computer/watchdog/d1` exports `createD1Watchdog` and `watchdogD1Schema`.
 `@fungi.computer/watchdog/postgres` exports `createPostgresWatchdog` and
 `watchdogPostgresSchema`. Apply the package-owned schema through your migration
-tool before you open a runtime. Opening a runtime never migrates a database.
+tool before you open a runtime. Opening a runtime never migrates a database. The
+named `watchdog_execution_state` constraint identifies the current lifecycle
+grammar. An obsolete grammar is refused before execution. Native prepared
+admission remains part of the caller's migrated transaction; it performs no
+schema repair. Owner-local SQLite applies the same refusal when opening.
 
 These runtimes have the same `ingest`, `read`, `readQueueHead`, `tick`,
-`cancel`, `failLane`, `purge` and `hasPendingWork` operations. They take
+`cancel`, `failLane`, `purge` and `wakeState(now)` operations. They take
 `execute`, `wake` and an optional `now` clock instead of an owner and liveness
 probe. Watchdog answers liveness itself from the claim's lease.
 
 D1 `enqueue(job)` returns a prepared statement for the producer's native batch.
 `enqueueFromSelect({ text, values })` accepts a trusted native SQLite
 `?NNN`-bound SELECT of `job_id`, `queue_name`, `lane`, `priority`,
-`payload_json` and nullable `recovery_max`. Watchdog supplies its INSERT and
-conflict checks. This lets a job depend on facts conditionally inserted earlier
-in the same batch, without a JavaScript read in between. PostgreSQL
-`enqueue(client, job)` uses the caller's checked-out transaction client. The
-caller owns BEGIN, COMMIT and ROLLBACK. An identical replay does nothing. A
-conflicting identity or cargo fails the whole native transaction.
+`payload_json`, nullable `recovery_max` and nullable `recovery_window_ms`.
+Watchdog supplies its INSERT and conflict checks. This lets a job depend on
+facts conditionally inserted earlier in the same batch, without a JavaScript
+read in between. PostgreSQL `enqueue(client, job)` uses the caller's checked-out
+transaction client. The caller owns BEGIN, COMMIT and ROLLBACK. An identical
+replay does nothing. A conflicting identity or cargo fails the whole native
+transaction.
 
 Both adapters use the same lifecycle engine as the SQLite entrypoint. Claims
 stay private, with two-minute leases, ten-second renewal and bounded renewal
@@ -241,7 +291,7 @@ modules:
   with their Effect schemas.
 - `@fungi.computer/watchdog/effect`: `makeRuntime`, `WatchdogRuntimeEffect` and
   `EffectWatchdogOptions`. The Effect runtime also has
-  `readSettled(limit, afterSequence?)` for paging through settled jobs.
+  `readSettled(limit, afterSequence?, lane?)` for paging through settled jobs.
 - `@fungi.computer/watchdog/node-sqlite`: `fromNodeSqlite(database)` for a
   caller-owned Node SQLite database. It returns `NodeSqliteOwner`; its
   `NodeSqliteCursor` provides `toArray()` and `one()`, which returns exactly one
@@ -301,9 +351,12 @@ Every failure is a `WatchdogError` with a closed `cause`:
 
 - `store_unavailable`: the store threw, or an ingest replay conflicted with the
   stored job.
-- `store_invalid`: the lane-refusal input failed its strict lane/reason decoder.
-  Other store faults remain `store_unavailable`.
+- `store_invalid`: the lifecycle schema is obsolete, or lane-refusal input
+  failed its strict lane/reason decoder. Other store faults remain
+  `store_unavailable`.
 - `claim_unavailable`: a claim could not be taken or renewed.
+- `drain_failed`: interrupted execution did not prove that foreign cleanup
+  finished.
 - `execution_failed`: your Promise executor threw. `tick()` does not reject. The
   job settles as `failed` with this code as its `failureReason`.
 - `settlement_rejected`: the claim was replaced or expired before settlement.

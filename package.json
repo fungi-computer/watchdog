@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/watchdog",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Payload-blind durable work scheduling and settlement core",
   "type": "module",
@@ -53,7 +53,8 @@
     "effect": "4.0.2",
     "@cloudflare/workers-types": "5.20260828.1",
     "pg": "8.23.0",
-    "@types/pg": "8.23.1"
+    "@types/pg": "8.23.1",
+    "@fungi.computer/almanac": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
