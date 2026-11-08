@@ -1,5 +1,14 @@
 # @fungi.computer/watchdog
 
+## 0.1.2
+
+### Patch Changes
+
+- Changes since 0.1.1:
+
+  - fix(docs): build mycelium and watchdog before their docs check and drop
+    in-page README anchors
+
 ## 0.1.1
 
 ### Patch Changes

@@ -5,6 +5,13 @@ SQLite database, and each `tick()` claims one ready job, runs your executor and
 records exactly one terminal outcome. If the process dies mid-job, the next tick
 asks your liveness probe what happened and recovers the work.
 
+```sh
+npm install @fungi.computer/watchdog
+```
+
+Then run the quick start below: one short file, in-memory `node:sqlite` on Node
+24, no other setup.
+
 Watchdog never looks inside a job. The payload, queue name and lane are opaque
 values you choose. Your code decides what a job means and how to run it.
 Watchdog owns the lifecycle: queued, running, completing, settled. Claims, claim
@@ -15,11 +22,7 @@ with an honest outcome, without writing your own state machine. It runs on any
 synchronous SQLite owner, such as a Cloudflare Durable Object's storage or
 `node:sqlite`, and on shared D1 or PostgreSQL databases.
 
-## Install or set up
-
-```sh
-npm install @fungi.computer/watchdog
-```
+## Requirements and entrypoints
 
 Watchdog is ESM-only. The SQLite entrypoint runs anywhere you have a synchronous
 SQLite handle, such as Cloudflare Durable Object storage or `node:sqlite` in
