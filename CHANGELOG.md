@@ -1,5 +1,13 @@
 # @fungi.computer/watchdog
 
+## 0.1.3
+
+### Patch Changes
+
+- Changes since 0.1.2:
+
+  - fix(docs): build each package before its own docs check
+
 ## 0.1.2
 
 ### Patch Changes

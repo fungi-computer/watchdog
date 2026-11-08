@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/watchdog",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Payload-blind durable work scheduling and settlement core",
   "type": "module",

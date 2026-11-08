@@ -1,8 +1,0 @@
-{
-  "extends": ["//"],
-  "tasks": {
-    "docs": {
-      "dependsOn": ["^build", "build"]
-    }
-  }
-}
