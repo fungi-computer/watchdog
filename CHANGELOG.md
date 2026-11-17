@@ -1,5 +1,16 @@
 # @fungi.computer/watchdog
 
+## 0.1.4
+
+### Patch Changes
+
+- Changes since 0.1.3:
+
+  - fix(watchdog): read the transaction flag through a call so lint sees it
+    change
+  - fix(watchdog): surface the original error when SQLite already rolled back
+  - fix(watchdog): roll back a commit SQLite refuses as busy
+
 ## 0.1.3
 
 ### Patch Changes

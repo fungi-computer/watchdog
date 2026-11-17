@@ -82,14 +82,38 @@ export function fromNodeSqlite(database: DatabaseSync): NodeSqliteOwner {
     },
     transactionSync: (operation) => {
       const name = `watchdog_owner_${String(transaction++)}`;
+      // The outermost savepoint opens the real transaction, so its RELEASE is
+      // the commit, and SQLite refuses a commit as busy while another
+      // connection reads. A refused commit leaves the transaction open.
+      const inTransaction = (): boolean => database.isTransaction;
+      const outermost = !inTransaction();
       database.exec(`SAVEPOINT ${name}`);
       try {
         const result = operation();
         database.exec(`RELEASE ${name}`);
         return result;
       } catch (cause) {
-        database.exec(`ROLLBACK TO ${name}`);
-        database.exec(`RELEASE ${name}`);
+        if (!outermost) {
+          // Inside the caller's transaction a RELEASE never commits.
+          database.exec(`ROLLBACK TO ${name}`);
+          database.exec(`RELEASE ${name}`);
+          throw cause;
+        }
+        // A plain ROLLBACK needs no exclusive lock, so it succeeds exactly
+        // when the commit could not: the connection never stays in the
+        // transaction, holding its lock against every other connection.
+        // Some failures (OR ROLLBACK, disk full) end the transaction in
+        // SQLite itself; then there is nothing to roll back and the caller
+        // sees the original error.
+        try {
+          if (inTransaction()) database.exec("ROLLBACK");
+        } catch (rollbackCause) {
+          throw new AggregateError(
+            [cause, rollbackCause],
+            "SQLite transaction failed and could not be rolled back",
+            { cause: rollbackCause },
+          );
+        }
         throw cause;
       }
     },

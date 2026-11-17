@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it } from "vitest";
 import { fromNodeSqlite } from "../src/node-sqlite.js";
@@ -106,6 +109,92 @@ it("executes the Team owner's multi-statement schema as one unbound call", () =>
         )
         .toArray(),
     ).toEqual([{ name: "first" }, { name: "second" }]);
+  } finally {
+    database.close();
+  }
+});
+
+it("a commit refused as busy rolls back: no open transaction is left, and others can write", () => {
+  const directory = mkdtempSync(join(tmpdir(), "watchdog-busy-commit-"));
+  const path = join(directory, "store.sqlite");
+  const writer = new DatabaseSync(path, { timeout: 0 });
+  const reader = new DatabaseSync(path, { timeout: 0 });
+  const other = new DatabaseSync(path, { timeout: 0 });
+  try {
+    const owner = fromNodeSqlite(writer);
+    owner.sql.exec("CREATE TABLE sample (name TEXT)");
+    // A foreign reader holds a shared lock, so the writer's COMMIT is refused.
+    reader.exec("BEGIN");
+    reader.prepare("SELECT COUNT(*) FROM sample").all();
+    expect(() => {
+      owner.transactionSync(() => {
+        owner.sql.exec("INSERT INTO sample VALUES ('refused')");
+      });
+    }).toThrow(/database is locked/u);
+    // The connection is not left inside the transaction it could not commit.
+    expect(writer.isTransaction).toBe(false);
+    reader.exec("ROLLBACK");
+    // Nothing of the refused transaction survives, and another connection can
+    // write: before the fix the writer still held its lock.
+    other.exec("INSERT INTO sample VALUES ('other')");
+    owner.transactionSync(() => {
+      owner.sql.exec("INSERT INTO sample VALUES ('retry')");
+    });
+    expect(
+      other.prepare("SELECT name FROM sample ORDER BY rowid").all(),
+    ).toEqual([{ name: "other" }, { name: "retry" }]);
+  } finally {
+    other.close();
+    reader.close();
+    writer.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("a refused commit inside a caller's own transaction leaves that transaction to the caller", () => {
+  const directory = mkdtempSync(join(tmpdir(), "watchdog-busy-nested-"));
+  const path = join(directory, "store.sqlite");
+  const writer = new DatabaseSync(path, { timeout: 0 });
+  try {
+    const owner = fromNodeSqlite(writer);
+    owner.sql.exec("CREATE TABLE sample (name TEXT)");
+    writer.exec("BEGIN");
+    const failure = new Error("inner failure");
+    expect(() =>
+      owner.transactionSync(() => {
+        owner.sql.exec("INSERT INTO sample VALUES ('inner')");
+        throw failure;
+      }),
+    ).toThrow(failure);
+    // Only the inner work rolled back; the caller's transaction is still open.
+    expect(writer.isTransaction).toBe(true);
+    writer.exec("ROLLBACK");
+  } finally {
+    writer.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("surfaces the original error when SQLite already rolled the transaction back itself", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    const owner = fromNodeSqlite(database);
+    owner.sql.exec("CREATE TABLE sample (name TEXT UNIQUE)");
+    owner.sql.exec("INSERT INTO sample VALUES ('taken')");
+    // OR ROLLBACK makes SQLite end the whole transaction itself, so there is
+    // nothing left for the adapter to roll back.
+    expect(() => {
+      owner.transactionSync(() => {
+        owner.sql.exec("INSERT OR ROLLBACK INTO sample VALUES ('taken')");
+      });
+    }).toThrow(/UNIQUE constraint failed/u);
+    expect(database.isTransaction).toBe(false);
+    owner.transactionSync(() => {
+      owner.sql.exec("INSERT INTO sample VALUES ('next')");
+    });
+    expect(
+      owner.sql.exec("SELECT COUNT(*) AS n FROM sample").toArray(),
+    ).toEqual([{ n: 2 }]);
   } finally {
     database.close();
   }
