@@ -1,50 +1,25 @@
 # Watchdog (`@fungi.computer/watchdog`)
 
 Watchdog is a small durable job engine. You hand it jobs, it stores them in your
-SQLite database, and each `tick()` claims one ready job, runs your executor and
-records exactly one terminal outcome. If the process dies mid-job, the next tick
-asks your liveness probe what happened and recovers the work.
+SQLite database, and if the process dies mid-job it recovers the work.
+
+```mermaid
+flowchart LR
+  Host[Your host] -->|enqueue| Watchdog
+  Watchdog --> Db[(Your SQLite)]
+  Tick[tick] -->|claims one ready job| Watchdog
+  Watchdog -->|runs| Exec[Your executor]
+  Exec -->|one terminal outcome| Watchdog
+  Watchdog -->|after a crash, asks| Probe[Your liveness probe]
+```
+
+## Quick start
+
+Install it:
 
 ```sh
 npm install @fungi.computer/watchdog
 ```
-
-Then run the quick start below: one short file, in-memory `node:sqlite` on Node
-24, no other setup.
-
-Watchdog never looks inside a job. The payload, queue name and lane are opaque
-values you choose. Your code decides what a job means and how to run it.
-Watchdog owns the lifecycle: queued, running, completing, settled. Claims, claim
-tokens and the SQL that moves rows between states stay private to the package.
-
-Use it when you need work to survive a restart, run once per claim, and settle
-with an honest outcome, without writing your own state machine. It runs on any
-synchronous SQLite owner, such as a Cloudflare Durable Object's storage or
-`node:sqlite`, and on shared D1 or PostgreSQL databases.
-
-## Requirements and entrypoints
-
-Watchdog is ESM-only. The SQLite entrypoint runs anywhere you have a synchronous
-SQLite handle, such as Cloudflare Durable Object storage or `node:sqlite` in
-Node 24. Its runtime dependencies include Cairn, `effect`, `pg`, `@types/pg` and
-`@cloudflare/workers-types`, which npm installs for you.
-
-Entrypoints:
-
-- `@fungi.computer/watchdog`: the Promise API, `Watchdog.make`, and the public
-  job types and schemas.
-- `@fungi.computer/watchdog/effect`: the same runtime as Effect values, via
-  `makeRuntime`.
-- `@fungi.computer/watchdog/node-sqlite`: `fromNodeSqlite(database)` for a
-  caller-owned Node SQLite database. It returns `NodeSqliteOwner`; its
-  `NodeSqliteCursor` provides `toArray()` and `one()`, which returns exactly one
-  decoded row and throws for zero or multiple rows.
-- `@fungi.computer/watchdog/d1`: a runtime over a migrated Cloudflare D1
-  database.
-- `@fungi.computer/watchdog/postgres`: a runtime over a migrated PostgreSQL
-  database.
-
-## Quick start
 
 This runs one job through an in-memory `node:sqlite` database. The `owner`
 object is the whole host contract for the SQLite entrypoint: run a statement,
@@ -94,6 +69,73 @@ Run `tick()` again and it returns `{ status: "no_ready" }`. Ingest the same job
 again and it returns `{ status: "duplicate" }`.
 
 In a Durable Object, `ctx.storage` is already the SQLite owner.
+
+## Common tasks
+
+### Run one job
+
+The Quick start runs a job through in-memory `node:sqlite`.
+
+### Schedule work and track delivery
+
+See
+[Scheduled work and delivery attempts](#scheduled-work-and-delivery-attempts).
+
+### Use D1 or PostgreSQL
+
+See [Shared D1 and PostgreSQL storage](#shared-d1-and-postgresql-storage).
+
+### Understand recovery
+
+See [Core concepts](#core-concepts).
+
+## Reference
+
+### Overview
+
+Watchdog is a small durable job engine. You hand it jobs, it stores them in your
+SQLite database, and each `tick()` claims one ready job, runs your executor and
+records exactly one terminal outcome. If the process dies mid-job, the next tick
+asks your liveness probe what happened and recovers the work.
+
+```sh
+npm install @fungi.computer/watchdog
+```
+
+Then run the quick start below: one short file, in-memory `node:sqlite` on Node
+24, no other setup.
+
+Watchdog never looks inside a job. The payload, queue name and lane are opaque
+values you choose. Your code decides what a job means and how to run it.
+Watchdog owns the lifecycle: queued, running, completing, settled. Claims, claim
+tokens and the SQL that moves rows between states stay private to the package.
+
+Use it when you need work to survive a restart, run once per claim, and settle
+with an honest outcome, without writing your own state machine. It runs on any
+synchronous SQLite owner, such as a Cloudflare Durable Object's storage or
+`node:sqlite`, and on shared D1 or PostgreSQL databases.
+
+## Requirements and entrypoints
+
+Watchdog is ESM-only. The SQLite entrypoint runs anywhere you have a synchronous
+SQLite handle, such as Cloudflare Durable Object storage or `node:sqlite` in
+Node 24. Its runtime dependencies include Cairn, `effect`, `pg`, `@types/pg` and
+`@cloudflare/workers-types`, which npm installs for you.
+
+Entrypoints:
+
+- `@fungi.computer/watchdog`: the Promise API, `Watchdog.make`, and the public
+  job types and schemas.
+- `@fungi.computer/watchdog/effect`: the same runtime as Effect values, via
+  `makeRuntime`.
+- `@fungi.computer/watchdog/node-sqlite`: `fromNodeSqlite(database)` for a
+  caller-owned Node SQLite database. It returns `NodeSqliteOwner`; its
+  `NodeSqliteCursor` provides `toArray()` and `one()`, which returns exactly one
+  decoded row and throws for zero or multiple rows.
+- `@fungi.computer/watchdog/d1`: a runtime over a migrated Cloudflare D1
+  database.
+- `@fungi.computer/watchdog/postgres`: a runtime over a migrated PostgreSQL
+  database.
 
 ## Core concepts
 
