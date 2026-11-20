@@ -1,5 +1,13 @@
 # @fungi.computer/watchdog
 
+## 0.1.5
+
+### Patch Changes
+
+- Changes since 0.1.4:
+
+  - fix(watchdog): let concurrent Postgres claimers skip a job another is taking
+
 ## 0.1.4
 
 ### Patch Changes

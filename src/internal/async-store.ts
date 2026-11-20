@@ -42,6 +42,12 @@ export function openAsyncStore(database: SqlDatabase, now: () => number) {
     database.clock === undefined
       ? `CAST($${String(parameter)} AS DOUBLE PRECISION)`
       : `(CASE WHEN $${String(parameter)}>${database.clock} THEN $${String(parameter)} ELSE ${database.clock} END)`;
+  // Concurrent claimers must not all queue behind the one job the first of them
+  // is taking: losing that race reports nothing ready while other jobs wait. A
+  // locked head is skipped, so each claimer takes the next job. SQLite and D1
+  // have one writer and no row locks.
+  const skipLocked =
+    database.dialect === "postgres" ? " FOR UPDATE SKIP LOCKED" : "";
   let schemaChecked = false;
   const query = async (text: string, values: Statement["values"] = []) => {
     if (!schemaChecked) {
@@ -194,7 +200,7 @@ export function openAsyncStore(database: SqlDatabase, now: () => number) {
         WHERE job_id=(SELECT job_id FROM watchdog_jobs WHERE state='queued'
           AND (cancellation_id IS NOT NULL OR not_before<=${at(2)})
           AND ${queuedHeadPredicate}
-          ORDER BY priority DESC,sequence LIMIT 1) AND state='queued' RETURNING ${columns}`,
+          ORDER BY priority DESC,sequence LIMIT 1${skipLocked}) AND state='queued' RETURNING ${columns}`,
             [token, now()],
           )
         )[0];
