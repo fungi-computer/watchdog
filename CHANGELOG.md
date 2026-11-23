@@ -1,5 +1,13 @@
 # @fungi.computer/watchdog
 
+## 0.1.6
+
+### Patch Changes
+
+- Changes since 0.1.5:
+
+  - perf(watchdog): verify a shared database's schema once, not once per runtime
+
 ## 0.1.5
 
 ### Patch Changes

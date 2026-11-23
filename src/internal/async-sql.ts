@@ -8,6 +8,11 @@ export type Statement = Readonly<{ text: string; values: readonly SqlValue[] }>;
 export type SqlDatabase = Readonly<{
   dialect: "sqlite" | "postgres";
   clock?: string | undefined;
+  /**
+   * The native database object runtimes over the same database share. Its
+   * schema is verified once for all of them; absent, each store verifies its own.
+   */
+  shared?: object | undefined;
   query: (statement: Statement) => Promise<readonly SqlRow[]>;
 }>;
 

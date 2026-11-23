@@ -35,6 +35,11 @@ export const attempt = <A>(
         : new WatchdogError("store_unavailable", error),
   });
 
+// One schema verification per native database, shared by every runtime opened
+// on it and by their concurrent first queries. A failed verification is
+// forgotten, so the next query retries it after a migration lands.
+const verifiedSchemas = new WeakMap<object, Promise<void>>();
+
 export function openAsyncStore(database: SqlDatabase, now: () => number) {
   // The database checks wall time when the mutation executes, so a delayed
   // renewal cannot resurrect a lease that expired while the request was in flight.
@@ -48,31 +53,46 @@ export function openAsyncStore(database: SqlDatabase, now: () => number) {
   // have one writer and no row locks.
   const skipLocked =
     database.dialect === "postgres" ? " FOR UPDATE SKIP LOCKED" : "";
-  let schemaChecked = false;
-  const query = async (text: string, values: Statement["values"] = []) => {
-    if (!schemaChecked) {
-      const current = await database.query({
-        text:
-          database.dialect === "postgres"
-            ? "SELECT 1 AS current FROM pg_constraint WHERE conrelid = 'watchdog_jobs'::regclass AND conname = 'watchdog_execution_state'"
-            : "SELECT 1 AS current FROM sqlite_schema WHERE name = 'watchdog_jobs' AND instr(sql, 'watchdog_execution_state') > 0",
+  const verifySchema = async () => {
+    const current = await database.query({
+      text:
+        database.dialect === "postgres"
+          ? "SELECT 1 AS current FROM pg_constraint WHERE conrelid = 'watchdog_jobs'::regclass AND conname = 'watchdog_execution_state'"
+          : "SELECT 1 AS current FROM sqlite_schema WHERE name = 'watchdog_jobs' AND instr(sql, 'watchdog_execution_state') > 0",
+      values: [],
+    });
+    if (current.length !== 1)
+      throw new WatchdogError(
+        "store_invalid",
+        new Error("Obsolete Watchdog execution schema"),
+      );
+    try {
+      await database.query({
+        text: `SELECT ${columns} FROM watchdog_jobs LIMIT 0`,
         values: [],
       });
-      if (current.length !== 1)
-        throw new WatchdogError(
-          "store_invalid",
-          new Error("Obsolete Watchdog execution schema"),
-        );
-      try {
-        await database.query({
-          text: `SELECT ${columns} FROM watchdog_jobs LIMIT 0`,
-          values: [],
-        });
-      } catch (error) {
-        throw new WatchdogError("store_invalid", error);
-      }
-      schemaChecked = true;
+    } catch (error) {
+      throw new WatchdogError("store_invalid", error);
     }
+  };
+  let ownSchema: Promise<void> | undefined;
+  const ensureSchema = (): Promise<void> => {
+    const known =
+      database.shared === undefined
+        ? ownSchema
+        : verifiedSchemas.get(database.shared);
+    if (known !== undefined) return known;
+    const pending = verifySchema().catch((error: unknown) => {
+      if (database.shared === undefined) ownSchema = undefined;
+      else verifiedSchemas.delete(database.shared);
+      throw error;
+    });
+    if (database.shared === undefined) ownSchema = pending;
+    else verifiedSchemas.set(database.shared, pending);
+    return pending;
+  };
+  const query = async (text: string, values: Statement["values"] = []) => {
+    await ensureSchema();
     return database.query({ text, values });
   };
   const row = async (id: string) => {
