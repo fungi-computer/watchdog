@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/watchdog",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Payload-blind durable work scheduling and settlement core",
   "type": "module",
@@ -41,7 +41,7 @@
     "smoke": "node --input-type=module -e \"import('./dist/index.js').then(({Watchdog}) => { if (!Watchdog) process.exit(1); })\""
   },
   "dependencies": {
-    "@fungi.computer/cairn": "0.1.0",
+    "@fungi.computer/cairn": "0.1.1",
     "effect": "4.0.2",
     "@cloudflare/workers-types": "5.20260828.1",
     "pg": "8.23.0",

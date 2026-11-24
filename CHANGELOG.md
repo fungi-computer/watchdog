@@ -1,5 +1,12 @@
 # @fungi.computer/watchdog
 
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/cairn@0.1.1
+
 ## 0.1.6
 
 ### Patch Changes
